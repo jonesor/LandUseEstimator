@@ -12,7 +12,7 @@ library(sf)
 
 # Load the CORINE data -----
 if (!exists("corine_DK")) {
-  corine_DK <- raster("Data/DenmarkCorineRaster.tif")
+  corine_DK <- raster("www/DenmarkCorineRaster.tif")
 }
 
 # UI part of the shiny app -----
