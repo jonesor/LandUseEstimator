@@ -73,40 +73,57 @@ ui <- shinyUI(fluidPage(
 
 # Server part of shiny
 server <- shinyServer(function(input, output, session) {
+  # Create a data frame to store land use values and corresponding labels
   landUseLookUp <- data.frame(value = 1:50) %>%
+    # Add a column for the land use labels
     mutate(broadLandUse = value) %>%
+    # Assign "Urban" label to values 1 through 9
     mutate(broadLandUse = ifelse(broadLandUse %in% 1:9, "Urban", broadLandUse)) %>%
+    # Assign "Park" label to values 10 through 11
     mutate(broadLandUse = ifelse(broadLandUse %in% 10:11, "Park", broadLandUse)) %>%
+    # Assign "Agriculture" label to values 12 through 22
     mutate(broadLandUse = ifelse(broadLandUse %in% 12:22, "Agriculture", broadLandUse)) %>%
+    # Assign "Forest/Seminatural" label to values 23 through 34
     mutate(broadLandUse = ifelse(broadLandUse %in% 23:34, "Forest/Seminatural", broadLandUse)) %>%
+    # Assign "Wetlands" label to values 35 through 39
     mutate(broadLandUse = ifelse(broadLandUse %in% 35:39, "Wetlands", broadLandUse)) %>%
+    # Assign "Water bodies" label to values 40 through 43
     mutate(broadLandUse = ifelse(broadLandUse %in% 40:43, "Water bodies", broadLandUse)) %>%
+    # Assign "Ocean" label to value 44
     mutate(broadLandUse = ifelse(broadLandUse %in% 44, "Ocean", broadLandUse)) %>%
+    # Remove NA values for values 48 through 50
     mutate(broadLandUse = ifelse(broadLandUse %in% 48:50, NA, broadLandUse)) %>%
     na.omit()
   
+  # Join land use data with CORINE data
   corine_DK_df <- as.data.frame(corine_DK, xy = TRUE) %>%
     rename(value = DenmarkCorineRaster) %>%
     left_join(landUseLookUp) %>%
+    # Remove "Ocean" and "Water bodies" entries
     filter(broadLandUse != "Ocean") %>%
     filter(broadLandUse != "Water bodies")
-  #Import the data from the file.
+  
+  # Import data from file uploaded by user
   df_coord_raw <- reactive({
+    # Require that the input file is available
     req(input$file1)
+    # Store the input file
     inFile <- input$file1
+    # Read the CSV file
     df_coord_raw <- read.csv(inFile$datapath,
-      header = input$header, sep = input$sep,
-      quote = input$quote
+                             header = input$header, sep = input$sep,
+                             quote = input$quote
     )
+    # Return the imported data
     return(df_coord_raw)
   })
-
+  
   # Render a table of the input data
   output$contents <- renderTable({
     df_coord_raw()
   })
-
   
+  # Convert coordinates to EU standard and store in new data frame
   df_coord_3035 <- reactive({
     req(df_coord_raw()) ## ?req #  require that the input is available
 
