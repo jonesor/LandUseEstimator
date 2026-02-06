@@ -8,6 +8,7 @@ library(tidyr)
 library(ggthemes)
 library(raster)
 library(sf)
+library(grid)
 
 # Load the CORINE data -----
 if (!exists("corine_DK")) {
@@ -52,6 +53,7 @@ ui <- shinyUI(fluidPage(
         '"'
       ),
       numericInput("buffer_m", "Buffer (m):", 2000, min = 1, max = 5000),
+      downloadButton("downloadSample", "Download Sample CSV"),
       tags$hr(),
       tableOutput("contents")
     ),
@@ -151,39 +153,103 @@ server <- shinyServer(function(input, output, session) {
     return(df_coord_3035)
   })
 
+  points_in_bounds <- reactive({
+    df_coord_3035 <- df_coord_3035()
+    data_bbox <- st_bbox(df_coord_3035)
+    raster_extent <- raster::extent(corine_DK)
+
+    data_bbox["xmin"] >= raster_extent@xmin &&
+      data_bbox["xmax"] <= raster_extent@xmax &&
+      data_bbox["ymin"] >= raster_extent@ymin &&
+      data_bbox["ymax"] <= raster_extent@ymax
+  })
+
   output$plot <- renderPlot({
     validate(
       need(!is.null(input$file1), "Upload a CSV to see the plot.")
     )
     df_coord_3035 <- df_coord_3035()
     data_bbox <- st_bbox(df_coord_3035)
-    dataExtent <- raster::extent(
-      data_bbox["xmin"] - 15000,
-      data_bbox["xmax"] + 15000,
-      data_bbox["ymin"] - 15000,
-      data_bbox["ymax"] + 15000
-    )
+    raster_extent <- raster::extent(corine_DK)
 
-    corine_visualiseMap <- raster::crop(corine_DK, dataExtent)
+    in_bounds <- points_in_bounds()
+
+    if (in_bounds) {
+      dataExtent <- raster::extent(
+        data_bbox["xmin"] - 15000,
+        data_bbox["xmax"] + 15000,
+        data_bbox["ymin"] - 15000,
+        data_bbox["ymax"] + 15000
+      )
+      corine_visualiseMap <- raster::crop(corine_DK, dataExtent)
+    } else {
+      corine_visualiseMap <- corine_DK
+    }
     corine_visualiseMap_df <- as.data.frame(corine_visualiseMap, xy = TRUE) %>%
       rename(value = DenmarkCorineRaster) %>%
       left_join(landUseLookUp) %>%
       filter(broadLandUse != "Ocean") %>%
       filter(broadLandUse != "Water bodies")
 
-    ggplot() +
+    main_plot <- ggplot() +
       geom_raster(data = corine_visualiseMap_df, aes(x = x, y = y, fill = broadLandUse)) +
       scale_fill_colorblind(name = "") +
       coord_equal() +
       theme_map() +
       geom_sf(data = df_coord_3035, colour = "red") +
+      labs(subtitle = if (in_bounds) NULL else "Points outside raster extent; showing full Denmark map.") +
       NULL
+
+    if (!in_bounds) {
+      return(main_plot)
+    }
+
+    inset_bbox <- data.frame(
+      xmin = data_bbox["xmin"],
+      xmax = data_bbox["xmax"],
+      ymin = data_bbox["ymin"],
+      ymax = data_bbox["ymax"]
+    )
+
+    inset_plot <- ggplot() +
+      geom_raster(data = corine_DK_df, aes(x = x, y = y, fill = broadLandUse)) +
+      scale_fill_colorblind(name = "") +
+      coord_equal() +
+      theme_map() +
+      theme(legend.position = "none", plot.margin = margin(0, 0, 0, 0)) +
+      geom_rect(
+        data = inset_bbox,
+        aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax),
+        fill = NA, colour = "red", linewidth = 0.4
+      )
+
+    inset_grob <- ggplotGrob(inset_plot)
+    main_extent <- raster::extent(corine_visualiseMap)
+    x_range <- main_extent@xmax - main_extent@xmin
+    y_range <- main_extent@ymax - main_extent@ymin
+
+    inset_xmin <- main_extent@xmax - (0.35 * x_range)
+    inset_xmax <- main_extent@xmax - (0.05 * x_range)
+    inset_ymin <- main_extent@ymax - (0.35 * y_range)
+    inset_ymax <- main_extent@ymax - (0.05 * y_range)
+
+    main_plot +
+      annotation_custom(
+        inset_grob,
+        xmin = inset_xmin,
+        xmax = inset_xmax,
+        ymin = inset_ymin,
+        ymax = inset_ymax
+      )
   })
 
 
   landUseSummary <- reactive({
     df_coord_3035 <- df_coord_3035()
     df_coord_raw <- df_coord_raw()
+    validate(
+      need(points_in_bounds(), "Points are outside the raster extent. Please check coordinates.")
+    )
 
     cache_key <- paste(
       input$buffer_m,
@@ -261,6 +327,15 @@ server <- shinyServer(function(input, output, session) {
     },
     content = function(file) {
       write.csv(landUseSummary(), file, row.names = FALSE)
+    }
+  )
+
+  output$downloadSample <- downloadHandler(
+    filename = function() {
+      "sample_points.csv"
+    },
+    content = function(file) {
+      file.copy("sample_data/sample_points.csv", file, overwrite = TRUE)
     }
   )
 })
