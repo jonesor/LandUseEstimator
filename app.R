@@ -177,12 +177,16 @@ server <- shinyServer(function(input, output, session) {
     df_coord_3035 <- df_coord_3035()
     df_coord_raw <- df_coord_raw()
 
-    # Extract land use codes
-    Landcover <- raster::extract(
-      x = corine_DK,
-      y = sf::as_Spatial(df_coord_3035),
-      buffer = input$buffer_m
-    )
+    Landcover <- NULL
+    withProgress(message = "Computing land use summary", value = 0, {
+      incProgress(0.2, detail = "Extracting land use codes")
+      Landcover <- raster::extract(
+        x = corine_DK,
+        y = sf::as_Spatial(df_coord_3035),
+        buffer = input$buffer_m
+      )
+      incProgress(0.4, detail = "Processing buffers")
+    })
     names(Landcover) <- df_coord_raw$addressID
 
     ## Compute maximum length
@@ -215,6 +219,10 @@ server <- shinyServer(function(input, output, session) {
         ForestSemiNat = ForestSemiNat / total, Wetlands = Wetlands / total
       ) %>%
       dplyr::select(-total)
+
+    withProgress(message = "Computing land use summary", value = 0.6, {
+      incProgress(0.4, detail = "Finalizing table")
+    })
 
     # Render the data.frame
     return(outputLandUse)
