@@ -52,7 +52,11 @@ ui <- shinyUI(fluidPage(
         ),
         '"'
       ),
+      selectInput("id_col", "ID column", choices = character(0)),
+      selectInput("lon_col", "Longitude column", choices = character(0)),
+      selectInput("lat_col", "Latitude column", choices = character(0)),
       numericInput("buffer_m", "Buffer (m):", 2000, min = 1, max = 5000),
+      checkboxInput("show_legend", "Show map legend", TRUE),
       downloadButton("downloadSample", "Download Sample CSV"),
       tags$hr(),
       tableOutput("contents")
@@ -118,9 +122,7 @@ server <- shinyServer(function(input, output, session) {
 
     validate(
       need(ncol(df_coord_raw) > 0, "Uploaded file has no columns."),
-      need(all(c("longitude", "latitude", "addressID") %in% names(df_coord_raw)),
-        "CSV must include columns: longitude, latitude, addressID."
-      )
+      need(ncol(df_coord_raw) >= 3, "CSV must have at least 3 columns.")
     )
 
     return(df_coord_raw)
@@ -133,6 +135,13 @@ server <- shinyServer(function(input, output, session) {
     )
     df_coord_raw()
   })
+
+  observeEvent(df_coord_raw(), {
+    cols <- names(df_coord_raw())
+    updateSelectInput(session, "id_col", choices = cols, selected = if ("addressID" %in% cols) "addressID" else cols[1])
+    updateSelectInput(session, "lon_col", choices = cols, selected = if ("longitude" %in% cols) "longitude" else cols[1])
+    updateSelectInput(session, "lat_col", choices = cols, selected = if ("latitude" %in% cols) "latitude" else cols[1])
+  }, ignoreInit = TRUE)
   
   # Convert coordinates to EU standard and store in new data frame
   df_coord_3035 <- reactive({
@@ -140,13 +149,19 @@ server <- shinyServer(function(input, output, session) {
     df_coord_raw <- df_coord_raw()
 
     validate(
-      need(is.numeric(df_coord_raw$longitude) && is.numeric(df_coord_raw$latitude),
-        "longitude and latitude must be numeric."
+      need(!is.null(input$id_col) && !is.null(input$lon_col) && !is.null(input$lat_col),
+        "Select ID, longitude, and latitude columns."
+      ),
+      need(input$lon_col %in% names(df_coord_raw) && input$lat_col %in% names(df_coord_raw),
+        "Selected longitude/latitude columns do not exist."
+      ),
+      need(is.numeric(df_coord_raw[[input$lon_col]]) && is.numeric(df_coord_raw[[input$lat_col]]),
+        "Selected longitude and latitude columns must be numeric."
       )
     )
 
     df_coord_4326 <- df_coord_raw %>%
-      st_as_sf(coords = c("longitude", "latitude"), crs = st_crs(4326))
+      st_as_sf(coords = c(input$lon_col, input$lat_col), crs = st_crs(4326))
 
     df_coord_3035 <- st_transform(df_coord_4326, st_crs(raster::crs(corine_DK)))
 
@@ -199,6 +214,10 @@ server <- shinyServer(function(input, output, session) {
       geom_sf(data = df_coord_3035, colour = "red") +
       labs(subtitle = if (in_bounds) NULL else "Points outside raster extent; showing full Denmark map.") +
       NULL
+
+    if (!isTRUE(input$show_legend)) {
+      main_plot <- main_plot + theme(legend.position = "none")
+    }
 
     if (!in_bounds) {
       return(main_plot)
@@ -270,7 +289,7 @@ server <- shinyServer(function(input, output, session) {
       )
       incProgress(0.4, detail = "Processing buffers")
     })
-    names(Landcover) <- df_coord_raw$addressID
+    names(Landcover) <- df_coord_raw[[input$id_col]]
 
     ## Compute maximum length
     max.length <- max(sapply(Landcover, length))
