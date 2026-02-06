@@ -7,60 +7,57 @@ library(dplyr)
 library(tidyr)
 library(ggthemes)
 library(raster)
-library(rgdal)
 library(sf)
 
 # Load the CORINE data -----
 if (!exists("corine_DK")) {
-  corine_DK <- raster("www/DenmarkCorineRaster.tif")
+  corine_DK <- tryCatch(
+    raster::raster("www/DenmarkCorineRaster.tif"),
+    error = function(e) {
+      stop("Failed to load raster at www/DenmarkCorineRaster.tif: ", e$message)
+    }
+  )
 }
 
 # UI part of the shiny app -----
 ui <- shinyUI(fluidPage(
   titlePanel("Land use estimator"),
-  tabsetPanel(
-    tabPanel(
-      "Upload Your Data",
-      titlePanel(""),
-      sidebarLayout(
-        sidebarPanel(
-          fileInput("file1", "Choose CSV File",
-            accept = c(
-              "text/csv",
-              "text/comma-separated-values,text/plain",
-              ".csv"
-            )
-          ),
-          tags$br(),
-          checkboxInput("header", "Header", TRUE),
-          radioButtons(
-            "sep", "Separator",
-            c(
-              Comma = ",",
-              Semicolon = ";",
-              Tab = "\t"
-            ),
-            ","
-          ),
-          radioButtons(
-            "quote", "Quote",
-            c(
-              None = "",
-              "Double Quote" = '"',
-              "Single Quote" = "'"
-            ),
-            '"'
-          ),
-          numericInput("buffer_m", "Buffer (m):", 2000, min = 1, max = 5000),
-        ),
-        mainPanel(
-          tableOutput("contents")
+  sidebarLayout(
+    sidebarPanel(
+      fileInput("file1", "Choose CSV File",
+        accept = c(
+          "text/csv",
+          "text/comma-separated-values,text/plain",
+          ".csv"
         )
-      )
+      ),
+      tags$br(),
+      checkboxInput("header", "Header", TRUE),
+      radioButtons(
+        "sep", "Separator",
+        c(
+          Comma = ",",
+          Semicolon = ";",
+          Tab = "\t"
+        ),
+        ","
+      ),
+      radioButtons(
+        "quote", "Quote",
+        c(
+          None = "",
+          "Double Quote" = '"',
+          "Single Quote" = "'"
+        ),
+        '"'
+      ),
+      numericInput("buffer_m", "Buffer (m):", 2000, min = 1, max = 5000),
+      tags$hr(),
+      tableOutput("contents")
     ),
     mainPanel(
       tabsetPanel(
-        tabPanel("Plot of locations", plotOutput("plot")),
+        tabPanel("Plot of locations", plotOutput("plot", height = "520px")),
         tabPanel(
           "Land use summary",
           tableOutput("table"),
@@ -105,16 +102,23 @@ server <- shinyServer(function(input, output, session) {
   
   # Import data from file uploaded by user
   df_coord_raw <- reactive({
-    # Require that the input file is available
     req(input$file1)
-    # Store the input file
     inFile <- input$file1
-    # Read the CSV file
-    df_coord_raw <- read.csv(inFile$datapath,
-                             header = input$header, sep = input$sep,
-                             quote = input$quote
+    df_coord_raw <- read.csv(
+      inFile$datapath,
+      header = input$header,
+      sep = input$sep,
+      quote = input$quote,
+      stringsAsFactors = FALSE
     )
-    # Return the imported data
+
+    validate(
+      need(ncol(df_coord_raw) > 0, "Uploaded file has no columns."),
+      need(all(c("longitude", "latitude", "addressID") %in% names(df_coord_raw)),
+        "CSV must include columns: longitude, latitude, addressID."
+      )
+    )
+
     return(df_coord_raw)
   })
   
@@ -125,28 +129,34 @@ server <- shinyServer(function(input, output, session) {
   
   # Convert coordinates to EU standard and store in new data frame
   df_coord_3035 <- reactive({
-    req(df_coord_raw()) ## ?req #  require that the input is available
-
+    req(df_coord_raw())
     df_coord_raw <- df_coord_raw()
 
-    df_coord_4326 <- df_coord_raw %>%
-      st_as_sf(coords = c("longitude", "latitude"), crs = st_crs(4326)) # set as simple features, with crs = 4326
+    validate(
+      need(is.numeric(df_coord_raw$longitude) && is.numeric(df_coord_raw$latitude),
+        "longitude and latitude must be numeric."
+      )
+    )
 
-    # Convert the coordinates to the EU standard
-    df_coord_3035 <- st_transform(df_coord_4326, corine_DK@crs)
-    
+    df_coord_4326 <- df_coord_raw %>%
+      st_as_sf(coords = c("longitude", "latitude"), crs = st_crs(4326))
+
+    df_coord_3035 <- st_transform(df_coord_4326, st_crs(raster::crs(corine_DK)))
+
     return(df_coord_3035)
   })
 
   output$plot <- renderPlot({
     df_coord_3035 <- df_coord_3035()
-    dataExtent <- extent(df_coord_3035)
-    dataExtent[1] <- dataExtent[1] - 15000
-    dataExtent[2] <- dataExtent[2] + 15000
-    dataExtent[3] <- dataExtent[3] - 15000
-    dataExtent[4] <- dataExtent[4] + 15000
+    data_bbox <- st_bbox(df_coord_3035)
+    dataExtent <- raster::extent(
+      data_bbox["xmin"] - 15000,
+      data_bbox["xmax"] + 15000,
+      data_bbox["ymin"] - 15000,
+      data_bbox["ymax"] + 15000
+    )
 
-    corine_visualiseMap <- crop(corine_DK, dataExtent)
+    corine_visualiseMap <- raster::crop(corine_DK, dataExtent)
     corine_visualiseMap_df <- as.data.frame(corine_visualiseMap, xy = TRUE) %>%
       rename(value = DenmarkCorineRaster) %>%
       left_join(landUseLookUp) %>%
@@ -168,7 +178,11 @@ server <- shinyServer(function(input, output, session) {
     df_coord_raw <- df_coord_raw()
 
     # Extract land use codes
-    Landcover <- raster::extract(x = corine_DK, df_coord_3035, buffer = input$buffer_m)
+    Landcover <- raster::extract(
+      x = corine_DK,
+      y = sf::as_Spatial(df_coord_3035),
+      buffer = input$buffer_m
+    )
     names(Landcover) <- df_coord_raw$addressID
 
     ## Compute maximum length
