@@ -70,6 +70,8 @@ ui <- shinyUI(fluidPage(
 
 # Server part of shiny
 server <- shinyServer(function(input, output, session) {
+  landUseCache <- reactiveValues(key = NULL, value = NULL)
+
   # Create a data frame to store land use values and corresponding labels
   landUseLookUp <- data.frame(value = 1:50) %>%
     # Add a column for the land use labels
@@ -124,6 +126,9 @@ server <- shinyServer(function(input, output, session) {
   
   # Render a table of the input data
   output$contents <- renderTable({
+    validate(
+      need(!is.null(input$file1), "Upload a CSV to preview its contents.")
+    )
     df_coord_raw()
   })
   
@@ -147,6 +152,9 @@ server <- shinyServer(function(input, output, session) {
   })
 
   output$plot <- renderPlot({
+    validate(
+      need(!is.null(input$file1), "Upload a CSV to see the plot.")
+    )
     df_coord_3035 <- df_coord_3035()
     data_bbox <- st_bbox(df_coord_3035)
     dataExtent <- raster::extent(
@@ -176,6 +184,15 @@ server <- shinyServer(function(input, output, session) {
   landUseSummary <- reactive({
     df_coord_3035 <- df_coord_3035()
     df_coord_raw <- df_coord_raw()
+
+    cache_key <- paste(
+      input$buffer_m,
+      paste(df_coord_raw$addressID, df_coord_raw$longitude, df_coord_raw$latitude, collapse = "|")
+    )
+
+    if (!is.null(landUseCache$key) && identical(landUseCache$key, cache_key)) {
+      return(landUseCache$value)
+    }
 
     Landcover <- NULL
     withProgress(message = "Computing land use summary", value = 0, {
@@ -224,11 +241,16 @@ server <- shinyServer(function(input, output, session) {
       incProgress(0.4, detail = "Finalizing table")
     })
 
-    # Render the data.frame
+    landUseCache$key <- cache_key
+    landUseCache$value <- outputLandUse
+
     return(outputLandUse)
   })
 
   output$table <- renderTable({
+    validate(
+      need(!is.null(input$file1), "Upload a CSV to see the land use summary.")
+    )
     landUseSummary()
   })
 
