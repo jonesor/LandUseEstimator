@@ -258,13 +258,12 @@ server <- shinyServer(function(input, output, session) {
     mutate(broadLandUse = ifelse(broadLandUse %in% 23:34, "Forest/Seminatural", broadLandUse)) %>%
     # Assign "Wetlands" label to values 35 through 39
     mutate(broadLandUse = ifelse(broadLandUse %in% 35:39, "Wetlands", broadLandUse)) %>%
-    # Assign "Water bodies" label to values 40 through 43
-    mutate(broadLandUse = ifelse(broadLandUse %in% 40:43, "Water bodies", broadLandUse)) %>%
-    # Assign "Ocean" label to value 44
-    mutate(broadLandUse = ifelse(broadLandUse %in% 44, "Ocean", broadLandUse)) %>%
-    # Remove NA values for values 48 through 50
-    mutate(broadLandUse = ifelse(broadLandUse %in% 48:50, NA, broadLandUse)) %>%
-    na.omit()
+    # Assign "Water" label to values 40 through 43
+    mutate(broadLandUse = ifelse(broadLandUse %in% 40:43, "Water", broadLandUse)) %>%
+    # Assign "Water" label to value 44
+    mutate(broadLandUse = ifelse(broadLandUse %in% 44, "Water", broadLandUse)) %>%
+    # Treat values 48 through 50 as Water
+    mutate(broadLandUse = ifelse(broadLandUse %in% 48:50, "Water", broadLandUse))
 
   land_use_levels <- c(
     "Urban",
@@ -272,17 +271,23 @@ server <- shinyServer(function(input, output, session) {
     "Agriculture",
     "Forest/Seminatural",
     "Wetlands",
-    "Water bodies",
-    "Ocean"
+    "Water"
+  )
+
+  land_use_palette <- c(
+    "Urban" = "#b2182b",
+    "Park" = "#fee08b",
+    "Agriculture" = "#fdae61",
+    "Forest/Seminatural" = "#1b7837",
+    "Wetlands" = "#a6d96a",
+    "Water" = "#bdbdbd"
   )
   
   # Join land use data with CORINE data (downsampled for plotting)
   corine_DK_plot <- downsample_for_plot(corine_DK)
   corine_DK_df <- raster_to_df(corine_DK_plot) %>%
     left_join(landUseLookUp) %>%
-    # Remove "Ocean" and "Water bodies" entries
-    filter(broadLandUse != "Ocean") %>%
-    filter(broadLandUse != "Water bodies") %>%
+    mutate(broadLandUse = ifelse(is.na(broadLandUse), "Water", broadLandUse)) %>%
     mutate(broadLandUse = factor(broadLandUse, levels = land_use_levels))
   
   # Import data from file uploaded by user (or default sample)
@@ -455,13 +460,12 @@ server <- shinyServer(function(input, output, session) {
     corine_visualiseMap <- downsample_for_plot(corine_visualiseMap)
     corine_visualiseMap_df <- raster_to_df(corine_visualiseMap) %>%
       left_join(landUseLookUp) %>%
-      filter(broadLandUse != "Ocean") %>%
-      filter(broadLandUse != "Water bodies") %>%
+      mutate(broadLandUse = ifelse(is.na(broadLandUse), "Water", broadLandUse)) %>%
       mutate(broadLandUse = factor(broadLandUse, levels = land_use_levels))
 
     main_plot <- ggplot() +
       geom_raster(data = corine_visualiseMap_df, aes(x = x, y = y, fill = broadLandUse)) +
-      scale_fill_colorblind(name = "Land use", drop = FALSE) +
+      scale_fill_manual(values = land_use_palette, name = "Land use", drop = FALSE) +
       coord_equal() +
       theme_map() +
       theme(
@@ -475,8 +479,8 @@ server <- shinyServer(function(input, output, session) {
         shape = 21,
         fill = "yellow",
         colour = "black",
-        size = 2.8,
-        stroke = 0.6
+        size = 4,
+        stroke = 0.8
       ) +
       labs(subtitle = if (in_bounds) NULL else "Points outside raster extent; showing full Denmark map.") +
       NULL
@@ -498,7 +502,7 @@ server <- shinyServer(function(input, output, session) {
 
     inset_plot <- ggplot() +
       geom_raster(data = corine_DK_df, aes(x = x, y = y, fill = broadLandUse)) +
-      scale_fill_colorblind(name = "") +
+      scale_fill_manual(values = land_use_palette, name = "") +
       coord_equal() +
       theme_map() +
       theme(
@@ -579,12 +583,12 @@ server <- shinyServer(function(input, output, session) {
         Agriculture = sum(item[broadLandUse == "Agriculture"], na.rm = TRUE),
         ForestSemiNat = sum(item[broadLandUse == "Forest/Seminatural"], na.rm = TRUE),
         Wetlands = sum(item[broadLandUse == "Wetlands"], na.rm = TRUE),
-        WaterBodies = sum(item[broadLandUse == "Water bodies"], na.rm = TRUE)
+        Water = sum(item[broadLandUse == "Water"], na.rm = TRUE)
       ) %>%
       mutate(
         Urban = Urban / total, Park = Park / total, Agriculture = Agriculture / total,
         ForestSemiNat = ForestSemiNat / total, Wetlands = Wetlands / total,
-        WaterBodies = WaterBodies / total
+        Water = Water / total
       ) %>%
       dplyr::select(-total)
 
