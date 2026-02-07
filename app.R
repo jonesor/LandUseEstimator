@@ -6,14 +6,155 @@ library(magrittr)
 library(dplyr)
 library(tidyr)
 library(ggthemes)
-library(raster)
 library(sf)
 library(grid)
+
+# Raster helpers (raster package preferred, terra fallback) -----
+MIN_BUFFER_M <- 100
+
+has_raster_pkg <- function() {
+  requireNamespace("raster", quietly = TRUE) &&
+    "raster" %in% getNamespaceExports("raster")
+}
+
+has_terra_pkg <- function() {
+  requireNamespace("terra", quietly = TRUE)
+}
+
+read_corine <- function(path) {
+  if (has_raster_pkg()) {
+    return(raster::raster(path))
+  }
+  if (has_terra_pkg()) {
+    return(terra::rast(path))
+  }
+  stop("Install the 'raster' or 'terra' package to load raster data.")
+}
+
+is_terra_raster <- function(x) {
+  inherits(x, "SpatRaster")
+}
+
+raster_crs <- function(x) {
+  if (is_terra_raster(x)) {
+    return(terra::crs(x, proj = TRUE))
+  }
+  raster::crs(x)
+}
+
+raster_extent <- function(x) {
+  if (is_terra_raster(x)) {
+    return(terra::ext(x))
+  }
+  raster::extent(x)
+}
+
+extent_bounds <- function(ext) {
+  if (inherits(ext, "Extent")) {
+    return(c(xmin = ext@xmin, xmax = ext@xmax, ymin = ext@ymin, ymax = ext@ymax))
+  }
+  c(
+    xmin = terra::xmin(ext),
+    xmax = terra::xmax(ext),
+    ymin = terra::ymin(ext),
+    ymax = terra::ymax(ext)
+  )
+}
+
+make_extent <- function(xmin, xmax, ymin, ymax, template) {
+  if (is_terra_raster(template)) {
+    return(terra::ext(xmin, xmax, ymin, ymax))
+  }
+  raster::extent(xmin, xmax, ymin, ymax)
+}
+
+raster_crop <- function(x, ext) {
+  if (is_terra_raster(x)) {
+    return(terra::crop(x, ext))
+  }
+  raster::crop(x, ext)
+}
+
+raster_extract <- function(x, points, buffer_m) {
+  if (is_terra_raster(x)) {
+    point_count <- nrow(points)
+    buf <- terra::buffer(terra::vect(points), width = buffer_m)
+    vals <- terra::extract(x, buf, list = TRUE)
+    if (is.data.frame(vals)) {
+      id_col <- if ("ID" %in% names(vals)) "ID" else names(vals)[1]
+      value_cols <- setdiff(names(vals), id_col)
+      value_col <- if (length(value_cols) > 0) value_cols[1] else id_col
+      split_vals <- split(vals[[value_col]], vals[[id_col]])
+      out <- vector("list", point_count)
+      for (i in seq_len(point_count)) {
+        key <- as.character(i)
+        out[[i]] <- if (key %in% names(split_vals)) {
+          normalize_values(split_vals[[key]])
+        } else {
+          numeric(0)
+        }
+      }
+      return(out)
+    }
+    if (length(vals) == 0) {
+      return(rep(list(numeric(0)), point_count))
+    }
+    out <- lapply(vals, function(v) {
+      if (is.data.frame(v) && ncol(v) >= 1) {
+        value_cols <- setdiff(names(v), c("ID", "id"))
+        value_col <- if (length(value_cols) > 0) value_cols[1] else names(v)[1]
+        return(normalize_values(v[[value_col]]))
+      }
+      if (is.vector(v)) {
+        return(normalize_values(v))
+      }
+      numeric(0)
+    })
+    if (length(out) < point_count) {
+      out <- c(out, rep(list(numeric(0)), point_count - length(out)))
+    }
+    return(out)
+  }
+  out <- raster::extract(x = x, y = sf::as_Spatial(points), buffer = buffer_m)
+  lapply(out, normalize_values)
+}
+
+raster_to_df <- function(x) {
+  df <- as.data.frame(x, xy = TRUE)
+  value_col <- setdiff(names(df), c("x", "y"))[1]
+  if (!is.null(value_col)) {
+    names(df)[names(df) == value_col] <- "value"
+  }
+  df
+}
+
+guess_col <- function(cols, patterns, fallback) {
+  lower_cols <- tolower(cols)
+  hits <- which(lower_cols %in% patterns)
+  if (length(hits) > 0) {
+    return(cols[hits[1]])
+  }
+  hits <- which(grepl(paste(patterns, collapse = "|"), lower_cols))
+  if (length(hits) > 0) {
+    return(cols[hits[1]])
+  }
+  fallback
+}
+
+normalize_values <- function(x) {
+  if (is.factor(x)) {
+    return(as.numeric(as.character(x)))
+  }
+  if (is.character(x)) {
+    return(suppressWarnings(as.numeric(x)))
+  }
+  x
+}
 
 # Load the CORINE data -----
 if (!exists("corine_DK")) {
   corine_DK <- tryCatch(
-    raster::raster("www/DenmarkCorineRaster.tif"),
+    read_corine("www/DenmarkCorineRaster.tif"),
     error = function(e) {
       stop("Failed to load raster at www/DenmarkCorineRaster.tif: ", e$message)
     }
@@ -55,7 +196,7 @@ ui <- shinyUI(fluidPage(
       selectInput("id_col", "ID column", choices = character(0)),
       selectInput("lon_col", "Longitude column", choices = character(0)),
       selectInput("lat_col", "Latitude column", choices = character(0)),
-      numericInput("buffer_m", "Buffer (m):", 2000, min = 1, max = 5000),
+      numericInput("buffer_m", "Buffer (m):", 2000, min = MIN_BUFFER_M, max = 5000),
       checkboxInput("show_legend", "Show map legend", TRUE),
       downloadButton("downloadSample", "Download Sample CSV"),
       tags$hr(),
@@ -76,8 +217,6 @@ ui <- shinyUI(fluidPage(
 
 # Server part of shiny
 server <- shinyServer(function(input, output, session) {
-  landUseCache <- reactiveValues(key = NULL, value = NULL)
-
   # Create a data frame to store land use values and corresponding labels
   landUseLookUp <- data.frame(value = 1:50) %>%
     # Add a column for the land use labels
@@ -101,24 +240,32 @@ server <- shinyServer(function(input, output, session) {
     na.omit()
   
   # Join land use data with CORINE data
-  corine_DK_df <- as.data.frame(corine_DK, xy = TRUE) %>%
-    rename(value = DenmarkCorineRaster) %>%
+  corine_DK_df <- raster_to_df(corine_DK) %>%
     left_join(landUseLookUp) %>%
     # Remove "Ocean" and "Water bodies" entries
     filter(broadLandUse != "Ocean") %>%
     filter(broadLandUse != "Water bodies")
   
-  # Import data from file uploaded by user
+  # Import data from file uploaded by user (or default sample)
   df_coord_raw <- reactive({
-    req(input$file1)
-    inFile <- input$file1
-    df_coord_raw <- read.csv(
-      inFile$datapath,
-      header = input$header,
-      sep = input$sep,
-      quote = input$quote,
-      stringsAsFactors = FALSE
-    )
+    if (is.null(input$file1)) {
+      df_coord_raw <- read.csv(
+        "sample_data/sample_points.csv",
+        header = TRUE,
+        sep = ",",
+        quote = "\"",
+        stringsAsFactors = FALSE
+      )
+    } else {
+      inFile <- input$file1
+      df_coord_raw <- read.csv(
+        inFile$datapath,
+        header = input$header,
+        sep = input$sep,
+        quote = input$quote,
+        stringsAsFactors = FALSE
+      )
+    }
 
     validate(
       need(ncol(df_coord_raw) > 0, "Uploaded file has no columns."),
@@ -130,40 +277,89 @@ server <- shinyServer(function(input, output, session) {
   
   # Render a table of the input data
   output$contents <- renderTable({
-    validate(
-      need(!is.null(input$file1), "Upload a CSV to preview its contents.")
-    )
     df_coord_raw()
   })
 
   observeEvent(df_coord_raw(), {
     cols <- names(df_coord_raw())
-    updateSelectInput(session, "id_col", choices = cols, selected = if ("addressID" %in% cols) "addressID" else cols[1])
-    updateSelectInput(session, "lon_col", choices = cols, selected = if ("longitude" %in% cols) "longitude" else cols[1])
-    updateSelectInput(session, "lat_col", choices = cols, selected = if ("latitude" %in% cols) "latitude" else cols[1])
+    default_id <- guess_col(cols, c("addressid", "id", "address_id", "addr_id"), cols[1])
+    default_lon <- guess_col(cols, c("longitude", "lon", "long", "lng", "x"), cols[1])
+    default_lat <- guess_col(cols, c("latitude", "lat", "y"), cols[1])
+
+    if (!is.null(input$id_col) && input$id_col %in% cols) {
+      default_id <- input$id_col
+    }
+    if (!is.null(input$lon_col) && input$lon_col %in% cols) {
+      default_lon <- input$lon_col
+    }
+    if (!is.null(input$lat_col) && input$lat_col %in% cols) {
+      default_lat <- input$lat_col
+    }
+
+    updateSelectInput(session, "id_col", choices = cols, selected = default_id)
+    updateSelectInput(session, "lon_col", choices = cols, selected = default_lon)
+    updateSelectInput(session, "lat_col", choices = cols, selected = default_lat)
   }, ignoreInit = TRUE)
+
+  resolved_cols <- reactive({
+    req(df_coord_raw())
+    cols <- names(df_coord_raw())
+
+    id_col <- input$id_col
+    lon_col <- input$lon_col
+    lat_col <- input$lat_col
+
+    if (is.null(id_col) || !(id_col %in% cols)) {
+      id_col <- guess_col(cols, c("addressid", "id", "address_id", "addr_id"), cols[1])
+      updateSelectInput(session, "id_col", choices = cols, selected = id_col)
+    }
+    if (is.null(lon_col) || !(lon_col %in% cols)) {
+      lon_col <- guess_col(cols, c("longitude", "lon", "long", "lng", "x"), cols[1])
+      updateSelectInput(session, "lon_col", choices = cols, selected = lon_col)
+    }
+    if (is.null(lat_col) || !(lat_col %in% cols)) {
+      lat_col <- guess_col(cols, c("latitude", "lat", "y"), cols[1])
+      updateSelectInput(session, "lat_col", choices = cols, selected = lat_col)
+    }
+
+    list(id = id_col, lon = lon_col, lat = lat_col)
+  })
   
   # Convert coordinates to EU standard and store in new data frame
   df_coord_3035 <- reactive({
     req(df_coord_raw())
     df_coord_raw <- df_coord_raw()
+    cols <- resolved_cols()
+    id_col <- cols$id
+    lon_col <- cols$lon
+    lat_col <- cols$lat
 
     validate(
-      need(!is.null(input$id_col) && !is.null(input$lon_col) && !is.null(input$lat_col),
+      need(!is.null(id_col) && !is.null(lon_col) && !is.null(lat_col),
         "Select ID, longitude, and latitude columns."
       ),
-      need(input$lon_col %in% names(df_coord_raw) && input$lat_col %in% names(df_coord_raw),
+      need(lon_col %in% names(df_coord_raw) && lat_col %in% names(df_coord_raw),
         "Selected longitude/latitude columns do not exist."
-      ),
-      need(is.numeric(df_coord_raw[[input$lon_col]]) && is.numeric(df_coord_raw[[input$lat_col]]),
+      )
+    )
+
+    lon_vals <- suppressWarnings(as.numeric(df_coord_raw[[lon_col]]))
+    lat_vals <- suppressWarnings(as.numeric(df_coord_raw[[lat_col]]))
+    bad_lon <- is.na(lon_vals) & !is.na(df_coord_raw[[lon_col]])
+    bad_lat <- is.na(lat_vals) & !is.na(df_coord_raw[[lat_col]])
+    validate(
+      need(!any(bad_lon) && !any(bad_lat),
         "Selected longitude and latitude columns must be numeric."
       )
     )
 
-    df_coord_4326 <- df_coord_raw %>%
-      st_as_sf(coords = c(input$lon_col, input$lat_col), crs = st_crs(4326))
+    df_coord_raw[[lon_col]] <- lon_vals
+    df_coord_raw[[lat_col]] <- lat_vals
 
-    df_coord_3035 <- st_transform(df_coord_4326, st_crs(raster::crs(corine_DK)))
+    df_coord_4326 <- df_coord_raw %>%
+      st_as_sf(coords = c(lon_col, lat_col), crs = st_crs(4326))
+
+    df_coord_3035 <- st_transform(df_coord_4326, st_crs(raster_crs(corine_DK)))
 
     return(df_coord_3035)
   })
@@ -171,37 +367,35 @@ server <- shinyServer(function(input, output, session) {
   points_in_bounds <- reactive({
     df_coord_3035 <- df_coord_3035()
     data_bbox <- st_bbox(df_coord_3035)
-    raster_extent <- raster::extent(corine_DK)
+    ext <- raster_extent(corine_DK)
+    bounds <- extent_bounds(ext)
 
-    data_bbox["xmin"] >= raster_extent@xmin &&
-      data_bbox["xmax"] <= raster_extent@xmax &&
-      data_bbox["ymin"] >= raster_extent@ymin &&
-      data_bbox["ymax"] <= raster_extent@ymax
+    data_bbox["xmin"] >= bounds["xmin"] &&
+      data_bbox["xmax"] <= bounds["xmax"] &&
+      data_bbox["ymin"] >= bounds["ymin"] &&
+      data_bbox["ymax"] <= bounds["ymax"]
   })
 
   output$plot <- renderPlot({
-    validate(
-      need(!is.null(input$file1), "Upload a CSV to see the plot.")
-    )
     df_coord_3035 <- df_coord_3035()
     data_bbox <- st_bbox(df_coord_3035)
-    raster_extent <- raster::extent(corine_DK)
+    ext <- raster_extent(corine_DK)
 
     in_bounds <- points_in_bounds()
 
     if (in_bounds) {
-      dataExtent <- raster::extent(
+      dataExtent <- make_extent(
         data_bbox["xmin"] - 15000,
         data_bbox["xmax"] + 15000,
         data_bbox["ymin"] - 15000,
-        data_bbox["ymax"] + 15000
+        data_bbox["ymax"] + 15000,
+        corine_DK
       )
-      corine_visualiseMap <- raster::crop(corine_DK, dataExtent)
+      corine_visualiseMap <- raster_crop(corine_DK, dataExtent)
     } else {
       corine_visualiseMap <- corine_DK
     }
-    corine_visualiseMap_df <- as.data.frame(corine_visualiseMap, xy = TRUE) %>%
-      rename(value = DenmarkCorineRaster) %>%
+    corine_visualiseMap_df <- raster_to_df(corine_visualiseMap) %>%
       left_join(landUseLookUp) %>%
       filter(broadLandUse != "Ocean") %>%
       filter(broadLandUse != "Water bodies")
@@ -211,6 +405,12 @@ server <- shinyServer(function(input, output, session) {
       scale_fill_colorblind(name = "") +
       coord_equal() +
       theme_map() +
+      theme(
+        legend.text = element_text(color = "black"),
+        legend.title = element_text(color = "black"),
+        legend.background = element_rect(fill = "white", color = NA),
+        legend.key = element_rect(fill = "white", color = NA)
+      ) +
       geom_sf(data = df_coord_3035, colour = "red") +
       labs(subtitle = if (in_bounds) NULL else "Points outside raster extent; showing full Denmark map.") +
       NULL
@@ -235,7 +435,12 @@ server <- shinyServer(function(input, output, session) {
       scale_fill_colorblind(name = "") +
       coord_equal() +
       theme_map() +
-      theme(legend.position = "none", plot.margin = margin(0, 0, 0, 0)) +
+      theme(
+        legend.position = "none",
+        plot.margin = margin(0, 0, 0, 0),
+        panel.border = element_rect(color = "black", fill = NA, linewidth = 0.6),
+        plot.background = element_rect(color = "black", fill = NA, linewidth = 0.6)
+      ) +
       geom_rect(
         data = inset_bbox,
         aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax),
@@ -243,14 +448,15 @@ server <- shinyServer(function(input, output, session) {
       )
 
     inset_grob <- ggplotGrob(inset_plot)
-    main_extent <- raster::extent(corine_visualiseMap)
-    x_range <- main_extent@xmax - main_extent@xmin
-    y_range <- main_extent@ymax - main_extent@ymin
+    main_extent <- raster_extent(corine_visualiseMap)
+    bounds <- extent_bounds(main_extent)
+    x_range <- bounds["xmax"] - bounds["xmin"]
+    y_range <- bounds["ymax"] - bounds["ymin"]
 
-    inset_xmin <- main_extent@xmax - (0.35 * x_range)
-    inset_xmax <- main_extent@xmax - (0.05 * x_range)
-    inset_ymin <- main_extent@ymax - (0.35 * y_range)
-    inset_ymax <- main_extent@ymax - (0.05 * y_range)
+    inset_xmin <- bounds["xmax"] - (0.35 * x_range)
+    inset_xmax <- bounds["xmax"] - (0.05 * x_range)
+    inset_ymin <- bounds["ymax"] - (0.35 * y_range)
+    inset_ymax <- bounds["ymax"] - (0.05 * y_range)
 
     main_plot +
       annotation_custom(
@@ -266,30 +472,22 @@ server <- shinyServer(function(input, output, session) {
   landUseSummary <- reactive({
     df_coord_3035 <- df_coord_3035()
     df_coord_raw <- df_coord_raw()
+    cols <- resolved_cols()
+    id_col <- cols$id
+    lon_col <- cols$lon
+    lat_col <- cols$lat
+    buffer_m <- max(MIN_BUFFER_M, input$buffer_m)
     validate(
       need(points_in_bounds(), "Points are outside the raster extent. Please check coordinates.")
     )
 
-    cache_key <- paste(
-      input$buffer_m,
-      paste(df_coord_raw$addressID, df_coord_raw$longitude, df_coord_raw$latitude, collapse = "|")
-    )
-
-    if (!is.null(landUseCache$key) && identical(landUseCache$key, cache_key)) {
-      return(landUseCache$value)
-    }
-
     Landcover <- NULL
     withProgress(message = "Computing land use summary", value = 0, {
       incProgress(0.2, detail = "Extracting land use codes")
-      Landcover <- raster::extract(
-        x = corine_DK,
-        y = sf::as_Spatial(df_coord_3035),
-        buffer = input$buffer_m
-      )
+      Landcover <- raster_extract(corine_DK, df_coord_3035, buffer_m)
       incProgress(0.4, detail = "Processing buffers")
     })
-    names(Landcover) <- df_coord_raw[[input$id_col]]
+    names(Landcover) <- df_coord_raw[[id_col]]
 
     ## Compute maximum length
     max.length <- max(sapply(Landcover, length))
@@ -314,11 +512,13 @@ server <- shinyServer(function(input, output, session) {
         Park = sum(item[broadLandUse == "Park"], na.rm = TRUE),
         Agriculture = sum(item[broadLandUse == "Agriculture"], na.rm = TRUE),
         ForestSemiNat = sum(item[broadLandUse == "Forest/Seminatural"], na.rm = TRUE),
-        Wetlands = sum(item[broadLandUse == "Wetlands"], na.rm = TRUE)
+        Wetlands = sum(item[broadLandUse == "Wetlands"], na.rm = TRUE),
+        WaterBodies = sum(item[broadLandUse == "Water bodies"], na.rm = TRUE)
       ) %>%
       mutate(
         Urban = Urban / total, Park = Park / total, Agriculture = Agriculture / total,
-        ForestSemiNat = ForestSemiNat / total, Wetlands = Wetlands / total
+        ForestSemiNat = ForestSemiNat / total, Wetlands = Wetlands / total,
+        WaterBodies = WaterBodies / total
       ) %>%
       dplyr::select(-total)
 
@@ -326,16 +526,10 @@ server <- shinyServer(function(input, output, session) {
       incProgress(0.4, detail = "Finalizing table")
     })
 
-    landUseCache$key <- cache_key
-    landUseCache$value <- outputLandUse
-
     return(outputLandUse)
   })
 
   output$table <- renderTable({
-    validate(
-      need(!is.null(input$file1), "Upload a CSV to see the land use summary.")
-    )
     landUseSummary()
   })
 
