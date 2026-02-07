@@ -190,6 +190,22 @@ if (!exists("corine_DK")) {
 
 # UI part of the shiny app -----
 ui <- shinyUI(fluidPage(
+  tags$head(
+    tags$style(HTML("
+      #plot {
+        width: 100% !important;
+        height: 70vh !important;
+        min-height: 420px;
+        max-height: 900px;
+      }
+      @media (min-width: 1400px) {
+        #plot {
+          height: 80vh !important;
+          max-height: 1100px;
+        }
+      }
+    "))
+  ),
   titlePanel("Land use estimator"),
   sidebarLayout(
     sidebarPanel(
@@ -231,7 +247,7 @@ ui <- shinyUI(fluidPage(
     ),
     mainPanel(
       tabsetPanel(
-        tabPanel("Plot of locations", plotOutput("plot", height = "520px")),
+        tabPanel("Plot of locations", plotOutput("plot", height = "70vh")),
         tabPanel(
           "Land use summary",
           tableOutput("table"),
