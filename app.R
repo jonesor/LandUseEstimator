@@ -119,6 +119,33 @@ raster_extract <- function(x, points, buffer_m) {
   lapply(out, normalize_values)
 }
 
+raster_ncell <- function(x) {
+  if (is_terra_raster(x)) {
+    return(terra::ncell(x))
+  }
+  raster::ncell(x)
+}
+
+downsample_for_plot <- function(x, max_cells = 200000) {
+  n_cells <- raster_ncell(x)
+  if (is.na(n_cells) || n_cells <= max_cells) {
+    return(x)
+  }
+  fact <- ceiling(sqrt(n_cells / max_cells))
+  mode_value <- function(vals, ...) {
+    vals <- vals[!is.na(vals)]
+    if (length(vals) == 0) {
+      return(NA_real_)
+    }
+    uniq <- unique(vals)
+    uniq[which.max(tabulate(match(vals, uniq)))]
+  }
+  if (is_terra_raster(x)) {
+    return(terra::aggregate(x, fact = fact, fun = mode_value, na.rm = TRUE))
+  }
+  raster::aggregate(x, fact = fact, fun = mode_value, na.rm = TRUE)
+}
+
 raster_to_df <- function(x) {
   df <- as.data.frame(x, xy = TRUE)
   value_col <- setdiff(names(df), c("x", "y"))[1]
@@ -238,13 +265,25 @@ server <- shinyServer(function(input, output, session) {
     # Remove NA values for values 48 through 50
     mutate(broadLandUse = ifelse(broadLandUse %in% 48:50, NA, broadLandUse)) %>%
     na.omit()
+
+  land_use_levels <- c(
+    "Urban",
+    "Park",
+    "Agriculture",
+    "Forest/Seminatural",
+    "Wetlands",
+    "Water bodies",
+    "Ocean"
+  )
   
-  # Join land use data with CORINE data
-  corine_DK_df <- raster_to_df(corine_DK) %>%
+  # Join land use data with CORINE data (downsampled for plotting)
+  corine_DK_plot <- downsample_for_plot(corine_DK)
+  corine_DK_df <- raster_to_df(corine_DK_plot) %>%
     left_join(landUseLookUp) %>%
     # Remove "Ocean" and "Water bodies" entries
     filter(broadLandUse != "Ocean") %>%
-    filter(broadLandUse != "Water bodies")
+    filter(broadLandUse != "Water bodies") %>%
+    mutate(broadLandUse = factor(broadLandUse, levels = land_use_levels))
   
   # Import data from file uploaded by user (or default sample)
   df_coord_raw <- reactive({
@@ -376,6 +415,24 @@ server <- shinyServer(function(input, output, session) {
       data_bbox["ymax"] <= bounds["ymax"]
   })
 
+  corine_extract_raster <- reactive({
+    df_coord_3035 <- df_coord_3035()
+    buffer_m <- max(MIN_BUFFER_M, input$buffer_m)
+    ext <- raster_extent(corine_DK)
+    bounds <- extent_bounds(ext)
+    data_bbox <- st_bbox(df_coord_3035)
+
+    cropped_extent <- make_extent(
+      max(bounds["xmin"], data_bbox["xmin"] - buffer_m),
+      min(bounds["xmax"], data_bbox["xmax"] + buffer_m),
+      max(bounds["ymin"], data_bbox["ymin"] - buffer_m),
+      min(bounds["ymax"], data_bbox["ymax"] + buffer_m),
+      corine_DK
+    )
+
+    raster_crop(corine_DK, cropped_extent)
+  })
+
   output$plot <- renderPlot({
     df_coord_3035 <- df_coord_3035()
     data_bbox <- st_bbox(df_coord_3035)
@@ -395,23 +452,32 @@ server <- shinyServer(function(input, output, session) {
     } else {
       corine_visualiseMap <- corine_DK
     }
+    corine_visualiseMap <- downsample_for_plot(corine_visualiseMap)
     corine_visualiseMap_df <- raster_to_df(corine_visualiseMap) %>%
       left_join(landUseLookUp) %>%
       filter(broadLandUse != "Ocean") %>%
-      filter(broadLandUse != "Water bodies")
+      filter(broadLandUse != "Water bodies") %>%
+      mutate(broadLandUse = factor(broadLandUse, levels = land_use_levels))
 
     main_plot <- ggplot() +
       geom_raster(data = corine_visualiseMap_df, aes(x = x, y = y, fill = broadLandUse)) +
-      scale_fill_colorblind(name = "") +
+      scale_fill_colorblind(name = "Land use", drop = FALSE) +
       coord_equal() +
       theme_map() +
       theme(
-        legend.text = element_text(color = "black"),
-        legend.title = element_text(color = "black"),
+        legend.text = element_text(color = "black", size = 11),
+        legend.title = element_text(color = "black", size = 12),
         legend.background = element_rect(fill = "white", color = NA),
         legend.key = element_rect(fill = "white", color = NA)
       ) +
-      geom_sf(data = df_coord_3035, colour = "red") +
+      geom_sf(
+        data = df_coord_3035,
+        shape = 21,
+        fill = "yellow",
+        colour = "black",
+        size = 2.8,
+        stroke = 0.6
+      ) +
       labs(subtitle = if (in_bounds) NULL else "Points outside raster extent; showing full Denmark map.") +
       NULL
 
@@ -484,7 +550,7 @@ server <- shinyServer(function(input, output, session) {
     Landcover <- NULL
     withProgress(message = "Computing land use summary", value = 0, {
       incProgress(0.2, detail = "Extracting land use codes")
-      Landcover <- raster_extract(corine_DK, df_coord_3035, buffer_m)
+      Landcover <- raster_extract(corine_extract_raster(), df_coord_3035, buffer_m)
       incProgress(0.4, detail = "Processing buffers")
     })
     names(Landcover) <- df_coord_raw[[id_col]]
