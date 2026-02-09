@@ -2,57 +2,30 @@
 
 library(shiny)
 library(ggplot2)
-library(magrittr)
 library(dplyr)
 library(tidyr)
-library(ggthemes)
 library(sf)
-library(grid)
+library(terra)
 
-# Raster helpers (raster package preferred, terra fallback) -----
+# Prefer disk-backed operations to reduce memory pressure on shinyapps.io.
+terra::terraOptions(todisk = TRUE, memfrac = 0.5)
+
+# Raster helpers (terra) -----
 MIN_BUFFER_M <- 100
 
-has_raster_pkg <- function() {
-  requireNamespace("raster", quietly = TRUE) &&
-    "raster" %in% getNamespaceExports("raster")
-}
-
-has_terra_pkg <- function() {
-  requireNamespace("terra", quietly = TRUE)
-}
-
 read_corine <- function(path) {
-  if (has_raster_pkg()) {
-    return(raster::raster(path))
-  }
-  if (has_terra_pkg()) {
-    return(terra::rast(path))
-  }
-  stop("Install the 'raster' or 'terra' package to load raster data.")
-}
-
-is_terra_raster <- function(x) {
-  inherits(x, "SpatRaster")
+  terra::rast(path)
 }
 
 raster_crs <- function(x) {
-  if (is_terra_raster(x)) {
-    return(terra::crs(x, proj = TRUE))
-  }
-  raster::crs(x)
+  terra::crs(x, proj = TRUE)
 }
 
 raster_extent <- function(x) {
-  if (is_terra_raster(x)) {
-    return(terra::ext(x))
-  }
-  raster::extent(x)
+  terra::ext(x)
 }
 
 extent_bounds <- function(ext) {
-  if (inherits(ext, "Extent")) {
-    return(c(xmin = ext@xmin, xmax = ext@xmax, ymin = ext@ymin, ymax = ext@ymax))
-  }
   c(
     xmin = terra::xmin(ext),
     xmax = terra::xmax(ext),
@@ -62,68 +35,55 @@ extent_bounds <- function(ext) {
 }
 
 make_extent <- function(xmin, xmax, ymin, ymax, template) {
-  if (is_terra_raster(template)) {
-    return(terra::ext(xmin, xmax, ymin, ymax))
-  }
-  raster::extent(xmin, xmax, ymin, ymax)
+  terra::ext(xmin, xmax, ymin, ymax)
 }
 
 raster_crop <- function(x, ext) {
-  if (is_terra_raster(x)) {
-    return(terra::crop(x, ext))
-  }
-  raster::crop(x, ext)
+  terra::crop(x, ext)
 }
 
 raster_extract <- function(x, points, buffer_m) {
-  if (is_terra_raster(x)) {
-    point_count <- nrow(points)
-    buf <- terra::buffer(terra::vect(points), width = buffer_m)
-    vals <- terra::extract(x, buf, list = TRUE)
-    if (is.data.frame(vals)) {
-      id_col <- if ("ID" %in% names(vals)) "ID" else names(vals)[1]
-      value_cols <- setdiff(names(vals), id_col)
-      value_col <- if (length(value_cols) > 0) value_cols[1] else id_col
-      split_vals <- split(vals[[value_col]], vals[[id_col]])
-      out <- vector("list", point_count)
-      for (i in seq_len(point_count)) {
-        key <- as.character(i)
-        out[[i]] <- if (key %in% names(split_vals)) {
-          normalize_values(split_vals[[key]])
-        } else {
-          numeric(0)
-        }
+  point_count <- nrow(points)
+  buf <- terra::buffer(terra::vect(points), width = buffer_m)
+  vals <- terra::extract(x, buf, list = TRUE)
+  if (is.data.frame(vals)) {
+    id_col <- if ("ID" %in% names(vals)) "ID" else names(vals)[1]
+    value_cols <- setdiff(names(vals), id_col)
+    value_col <- if (length(value_cols) > 0) value_cols[1] else id_col
+    split_vals <- split(vals[[value_col]], vals[[id_col]])
+    out <- vector("list", point_count)
+    for (i in seq_len(point_count)) {
+      key <- as.character(i)
+      out[[i]] <- if (key %in% names(split_vals)) {
+        normalize_values(split_vals[[key]])
+      } else {
+        numeric(0)
       }
-      return(out)
-    }
-    if (length(vals) == 0) {
-      return(rep(list(numeric(0)), point_count))
-    }
-    out <- lapply(vals, function(v) {
-      if (is.data.frame(v) && ncol(v) >= 1) {
-        value_cols <- setdiff(names(v), c("ID", "id"))
-        value_col <- if (length(value_cols) > 0) value_cols[1] else names(v)[1]
-        return(normalize_values(v[[value_col]]))
-      }
-      if (is.vector(v)) {
-        return(normalize_values(v))
-      }
-      numeric(0)
-    })
-    if (length(out) < point_count) {
-      out <- c(out, rep(list(numeric(0)), point_count - length(out)))
     }
     return(out)
   }
-  out <- raster::extract(x = x, y = sf::as_Spatial(points), buffer = buffer_m)
-  lapply(out, normalize_values)
+  if (length(vals) == 0) {
+    return(rep(list(numeric(0)), point_count))
+  }
+  out <- lapply(vals, function(v) {
+    if (is.data.frame(v) && ncol(v) >= 1) {
+      value_cols <- setdiff(names(v), c("ID", "id"))
+      value_col <- if (length(value_cols) > 0) value_cols[1] else names(v)[1]
+      return(normalize_values(v[[value_col]]))
+    }
+    if (is.vector(v)) {
+      return(normalize_values(v))
+    }
+    numeric(0)
+  })
+  if (length(out) < point_count) {
+    out <- c(out, rep(list(numeric(0)), point_count - length(out)))
+  }
+  out
 }
 
 raster_ncell <- function(x) {
-  if (is_terra_raster(x)) {
-    return(terra::ncell(x))
-  }
-  raster::ncell(x)
+  terra::ncell(x)
 }
 
 downsample_for_plot <- function(x, max_cells = 200000) {
@@ -140,14 +100,11 @@ downsample_for_plot <- function(x, max_cells = 200000) {
     uniq <- unique(vals)
     uniq[which.max(tabulate(match(vals, uniq)))]
   }
-  if (is_terra_raster(x)) {
-    return(terra::aggregate(x, fact = fact, fun = mode_value, na.rm = TRUE))
-  }
-  raster::aggregate(x, fact = fact, fun = mode_value, na.rm = TRUE)
+  terra::aggregate(x, fact = fact, fun = mode_value, na.rm = TRUE)
 }
 
-raster_to_df <- function(x) {
-  df <- as.data.frame(x, xy = TRUE)
+raster_to_df <- function(x, na_rm = TRUE) {
+  df <- terra::as.data.frame(x, xy = TRUE, na.rm = na_rm)
   value_col <- setdiff(names(df), c("x", "y"))[1]
   if (!is.null(value_col)) {
     names(df)[names(df) == value_col] <- "value"
@@ -178,15 +135,21 @@ normalize_values <- function(x) {
   x
 }
 
-# Load the CORINE data -----
-if (!exists("corine_DK")) {
-  corine_DK <- tryCatch(
-    read_corine("www/DenmarkCorineRaster.tif"),
-    error = function(e) {
-      stop("Failed to load raster at www/DenmarkCorineRaster.tif: ", e$message)
+corine_get <- local({
+  cache <- NULL
+  function() {
+    if (!is.null(cache)) {
+      return(cache)
     }
-  )
-}
+    cache <<- tryCatch(
+      read_corine("www/DenmarkCorineRaster.tif"),
+      error = function(e) {
+        stop("Failed to load raster at www/DenmarkCorineRaster.tif: ", e$message)
+      }
+    )
+    cache
+  }
+})
 
 # UI part of the shiny app -----
 ui <- shinyUI(fluidPage(
@@ -261,23 +224,23 @@ ui <- shinyUI(fluidPage(
 # Server part of shiny
 server <- shinyServer(function(input, output, session) {
   # Create a data frame to store land use values and corresponding labels
-  landUseLookUp <- data.frame(value = 1:50) %>%
+  landUseLookUp <- data.frame(value = 1:50) |>
     # Add a column for the land use labels
-    mutate(broadLandUse = value) %>%
+    mutate(broadLandUse = value) |>
     # Assign "Urban" label to values 1 through 9
-    mutate(broadLandUse = ifelse(broadLandUse %in% 1:9, "Urban", broadLandUse)) %>%
+    mutate(broadLandUse = ifelse(broadLandUse %in% 1:9, "Urban", broadLandUse)) |>
     # Assign "Park" label to values 10 through 11
-    mutate(broadLandUse = ifelse(broadLandUse %in% 10:11, "Park", broadLandUse)) %>%
+    mutate(broadLandUse = ifelse(broadLandUse %in% 10:11, "Park", broadLandUse)) |>
     # Assign "Agriculture" label to values 12 through 22
-    mutate(broadLandUse = ifelse(broadLandUse %in% 12:22, "Agriculture", broadLandUse)) %>%
+    mutate(broadLandUse = ifelse(broadLandUse %in% 12:22, "Agriculture", broadLandUse)) |>
     # Assign "Forest/Seminatural" label to values 23 through 34
-    mutate(broadLandUse = ifelse(broadLandUse %in% 23:34, "Forest/Seminatural", broadLandUse)) %>%
+    mutate(broadLandUse = ifelse(broadLandUse %in% 23:34, "Forest/Seminatural", broadLandUse)) |>
     # Assign "Wetlands" label to values 35 through 39
-    mutate(broadLandUse = ifelse(broadLandUse %in% 35:39, "Wetlands", broadLandUse)) %>%
+    mutate(broadLandUse = ifelse(broadLandUse %in% 35:39, "Wetlands", broadLandUse)) |>
     # Assign "Water" label to values 40 through 43
-    mutate(broadLandUse = ifelse(broadLandUse %in% 40:43, "Water", broadLandUse)) %>%
+    mutate(broadLandUse = ifelse(broadLandUse %in% 40:43, "Water", broadLandUse)) |>
     # Assign "Water" label to value 44
-    mutate(broadLandUse = ifelse(broadLandUse %in% 44, "Water", broadLandUse)) %>%
+    mutate(broadLandUse = ifelse(broadLandUse %in% 44, "Water", broadLandUse)) |>
     # Treat values 48 through 50 as Water
     mutate(broadLandUse = ifelse(broadLandUse %in% 48:50, "Water", broadLandUse))
 
@@ -298,13 +261,9 @@ server <- shinyServer(function(input, output, session) {
     "Wetlands" = "#a6d96a",
     "Water" = "#bdbdbd"
   )
-  
-  # Join land use data with CORINE data (downsampled for plotting)
-  corine_DK_plot <- downsample_for_plot(corine_DK)
-  corine_DK_df <- raster_to_df(corine_DK_plot) %>%
-    left_join(landUseLookUp) %>%
-    mutate(broadLandUse = ifelse(is.na(broadLandUse), "Water", broadLandUse)) %>%
-    mutate(broadLandUse = factor(broadLandUse, levels = land_use_levels))
+  corine_raster <- reactive({
+    corine_get()
+  })
   
   # Import data from file uploaded by user (or default sample)
   df_coord_raw <- reactive({
@@ -416,10 +375,10 @@ server <- shinyServer(function(input, output, session) {
     df_coord_raw[[lon_col]] <- lon_vals
     df_coord_raw[[lat_col]] <- lat_vals
 
-    df_coord_4326 <- df_coord_raw %>%
+    df_coord_4326 <- df_coord_raw |>
       st_as_sf(coords = c(lon_col, lat_col), crs = st_crs(4326))
 
-    df_coord_3035 <- st_transform(df_coord_4326, st_crs(raster_crs(corine_DK)))
+    df_coord_3035 <- st_transform(df_coord_4326, st_crs(raster_crs(corine_raster())))
 
     return(df_coord_3035)
   })
@@ -427,7 +386,7 @@ server <- shinyServer(function(input, output, session) {
   points_in_bounds <- reactive({
     df_coord_3035 <- df_coord_3035()
     data_bbox <- st_bbox(df_coord_3035)
-    ext <- raster_extent(corine_DK)
+    ext <- raster_extent(corine_raster())
     bounds <- extent_bounds(ext)
 
     data_bbox["xmin"] >= bounds["xmin"] &&
@@ -439,7 +398,7 @@ server <- shinyServer(function(input, output, session) {
   corine_extract_raster <- reactive({
     df_coord_3035 <- df_coord_3035()
     buffer_m <- max(MIN_BUFFER_M, input$buffer_m)
-    ext <- raster_extent(corine_DK)
+    ext <- raster_extent(corine_raster())
     bounds <- extent_bounds(ext)
     data_bbox <- st_bbox(df_coord_3035)
 
@@ -448,16 +407,17 @@ server <- shinyServer(function(input, output, session) {
       min(bounds["xmax"], data_bbox["xmax"] + buffer_m),
       max(bounds["ymin"], data_bbox["ymin"] - buffer_m),
       min(bounds["ymax"], data_bbox["ymax"] + buffer_m),
-      corine_DK
+      corine_raster()
     )
 
-    raster_crop(corine_DK, cropped_extent)
+    raster_crop(corine_raster(), cropped_extent)
   })
 
   output$plot <- renderPlot({
     df_coord_3035 <- df_coord_3035()
     data_bbox <- st_bbox(df_coord_3035)
-    ext <- raster_extent(corine_DK)
+    corine <- corine_raster()
+    ext <- raster_extent(corine)
 
     in_bounds <- points_in_bounds()
 
@@ -467,23 +427,23 @@ server <- shinyServer(function(input, output, session) {
         data_bbox["xmax"] + 15000,
         data_bbox["ymin"] - 15000,
         data_bbox["ymax"] + 15000,
-        corine_DK
+        corine
       )
-      corine_visualiseMap <- raster_crop(corine_DK, dataExtent)
+      corine_visualiseMap <- raster_crop(corine, dataExtent)
     } else {
-      corine_visualiseMap <- corine_DK
+      corine_visualiseMap <- corine
     }
-    corine_visualiseMap <- downsample_for_plot(corine_visualiseMap)
-    corine_visualiseMap_df <- raster_to_df(corine_visualiseMap) %>%
-      left_join(landUseLookUp) %>%
-      mutate(broadLandUse = ifelse(is.na(broadLandUse), "Water", broadLandUse)) %>%
+    corine_visualiseMap <- downsample_for_plot(corine_visualiseMap, max_cells = 40000)
+    corine_visualiseMap_df <- raster_to_df(corine_visualiseMap, na_rm = TRUE) |>
+      left_join(landUseLookUp) |>
+      mutate(broadLandUse = ifelse(is.na(broadLandUse), "Water", broadLandUse)) |>
       mutate(broadLandUse = factor(broadLandUse, levels = land_use_levels))
 
     main_plot <- ggplot() +
       geom_raster(data = corine_visualiseMap_df, aes(x = x, y = y, fill = broadLandUse)) +
       scale_fill_manual(values = land_use_palette, name = "Land use", drop = FALSE) +
       coord_equal() +
-      theme_map() +
+      theme_void() +
       theme(
         legend.text = element_text(color = "black", size = 11),
         legend.title = element_text(color = "black", size = 12),
@@ -516,11 +476,17 @@ server <- shinyServer(function(input, output, session) {
       ymax = data_bbox["ymax"]
     )
 
+    inset_raster <- downsample_for_plot(corine, max_cells = 15000)
+    inset_df <- raster_to_df(inset_raster, na_rm = TRUE) |>
+      left_join(landUseLookUp) |>
+      mutate(broadLandUse = ifelse(is.na(broadLandUse), "Water", broadLandUse)) |>
+      mutate(broadLandUse = factor(broadLandUse, levels = land_use_levels))
+
     inset_plot <- ggplot() +
-      geom_raster(data = corine_DK_df, aes(x = x, y = y, fill = broadLandUse)) +
+      geom_raster(data = inset_df, aes(x = x, y = y, fill = broadLandUse)) +
       scale_fill_manual(values = land_use_palette, name = "") +
       coord_equal() +
-      theme_map() +
+      theme_void() +
       theme(
         legend.position = "none",
         plot.margin = margin(0, 0, 0, 0),
@@ -584,14 +550,14 @@ server <- shinyServer(function(input, output, session) {
     ## cbind
     Landcover2 <- do.call(cbind, Landcover2)
 
-    x <- data.frame(Landcover2) %>%
-      pivot_longer(data = ., cols = everything(), names_to = "addressID", values_to = "value") %>%
-      arrange(addressID) %>%
+    x <- data.frame(Landcover2) |>
+      pivot_longer(cols = everything(), names_to = "addressID", values_to = "value") |>
+      arrange(addressID) |>
       left_join(landUseLookUp)
 
-    outputLandUse <- x %>%
-      mutate(item = 1) %>%
-      group_by(addressID) %>%
+    outputLandUse <- x |>
+      mutate(item = 1) |>
+      group_by(addressID) |>
       summarise(
         total = sum(item[!is.na(broadLandUse)], na.rm = TRUE),
         Urban = sum(item[broadLandUse == "Urban"], na.rm = TRUE),
@@ -600,12 +566,12 @@ server <- shinyServer(function(input, output, session) {
         ForestSemiNat = sum(item[broadLandUse == "Forest/Seminatural"], na.rm = TRUE),
         Wetlands = sum(item[broadLandUse == "Wetlands"], na.rm = TRUE),
         Water = sum(item[broadLandUse == "Water"], na.rm = TRUE)
-      ) %>%
+      ) |>
       mutate(
         Urban = Urban / total, Park = Park / total, Agriculture = Agriculture / total,
         ForestSemiNat = ForestSemiNat / total, Wetlands = Wetlands / total,
         Water = Water / total
-      ) %>%
+      ) |>
       dplyr::select(-total)
 
     withProgress(message = "Computing land use summary", value = 0.6, {
