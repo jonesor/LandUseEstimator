@@ -5,5 +5,5 @@ account: jonesor
 server: shinyapps.io
 hostUrl: https://api.shinyapps.io/v1
 appId: 5990083
-bundleId: 11553313
+bundleId: 11567406
 url: https://jonesor.shinyapps.io/LandUseEstimator/

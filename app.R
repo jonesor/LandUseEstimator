@@ -91,16 +91,18 @@ downsample_for_plot <- function(x, max_cells = 200000) {
   if (is.na(n_cells) || n_cells <= max_cells) {
     return(x)
   }
-  fact <- ceiling(sqrt(n_cells / max_cells))
-  mode_value <- function(vals, ...) {
-    vals <- vals[!is.na(vals)]
-    if (length(vals) == 0) {
-      return(NA_real_)
-    }
-    uniq <- unique(vals)
-    uniq[which.max(tabulate(match(vals, uniq)))]
-  }
-  terra::aggregate(x, fact = fact, fun = mode_value, na.rm = TRUE)
+  n_rows <- terra::nrow(x)
+  n_cols <- terra::ncol(x)
+  scale <- sqrt(max_cells / n_cells)
+  target_rows <- max(1, floor(n_rows * scale))
+  target_cols <- max(1, floor(n_cols * scale))
+  terra::spatSample(
+    x,
+    size = c(target_rows, target_cols),
+    method = "regular",
+    as.raster = TRUE,
+    values = TRUE
+  )
 }
 
 raster_to_df <- function(x, na_rm = TRUE) {
